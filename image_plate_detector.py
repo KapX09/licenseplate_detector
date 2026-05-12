@@ -11,13 +11,26 @@ TEST_DIR    = "test_images"
 CONF_THRESH = 0.4
 IOU_THRESH  = 0.45
 INPUT_SIZE  = (640, 640)
-SKIP_LEFT   = 0.10   # skip leftmost 10% of plate (IND badge)
+SKIP_LEFT   = 0.10
 
 
 sess_opts = ort.SessionOptions()
 sess_opts.log_severity_level = 3
-session = ort.InferenceSession(MODEL_PATH, sess_opts=sess_opts,
-                               providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+sess_opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+sess_opts.intra_op_num_threads = 4
+sess_opts.inter_op_num_threads = 2
+
+cuda_opts = {
+    'device_id': 0,
+    'arena_extend_strategy': 'kNextPowerOfTwo',
+    'gpu_mem_limit': 4 * 1024 * 1024 * 1024,
+    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+    'do_copy_in_default_stream': True,
+}
+session = ort.InferenceSession(
+    MODEL_PATH, sess_opts=sess_opts,
+    providers=[('CUDAExecutionProvider', cuda_opts), 'CPUExecutionProvider']
+)
 input_name = session.get_inputs()[0].name
 
 reader = easyocr.Reader(["en"], gpu=True)
@@ -95,23 +108,54 @@ def postprocess(output, orig_w, orig_h, size=INPUT_SIZE):
     return results
 
 
+def enhance_crop(crop):
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    if gray.std() < 40:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        gray = clahe.apply(gray)
+        crop = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+    return crop
+
+
 def read_plate(img_bgr, x1, y1, x2, y2):
     crop = img_bgr[y1:y2, x1:x2]
     if crop.size == 0:
         return ""
-    # skip left portion to avoid IND badge / state emblem
-    w = crop.shape[1]
-    crop = crop[:, int(w * SKIP_LEFT):]
+
+    h, w = crop.shape[:2]
+    left_skip = int(w * SKIP_LEFT)
+    inset = max(2, int(w * 0.02))
+    crop = crop[:, left_skip:w - inset]
+
+    if crop.shape[1] < 200:
+        scale = 200 / crop.shape[1]
+        crop = cv2.resize(crop, (200, int(crop.shape[0] * scale)),
+                          interpolation=cv2.INTER_CUBIC)
+
+    crop = enhance_crop(crop)
+
     results = reader.readtext(
         crop,
-        detail=0,
+        detail=1,
         allowlist="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-        paragraph=True,
-        text_threshold=0.7,
-        low_text=0.4,
-        width_ths=0.8,
+        paragraph=False,
+        text_threshold=0.5,
+        low_text=0.3,
+        width_ths=1.0,
+        height_ths=0.8,
+        slope_ths=0.2,
+        ycenter_ths=0.7,
     )
-    return "".join(results).upper()
+
+    if not results:
+        return ""
+
+    def y_center(r):
+        return (r[0][0][1] + r[0][2][1]) / 2
+
+    band_size = max(10, int(crop.shape[0] * 0.3))
+    results.sort(key=lambda r: (round(y_center(r) / band_size), r[0][0][0]))
+    return "".join(r[1] for r in results).upper()
 
 
 def process_image(img_path):
@@ -160,14 +204,20 @@ if __name__ == "__main__":
 
     print("\nDone.")
 
+
 '''
+Processing 11 image(s) from 'test_images' ...
 
 img1.jpg  →  1 plate(s) found
-  [1] IH2ABH  (0.86)
+  [1] HH2ABQ8  (0.86)
   Press any key for next image, 'q' to quit ...
 
 img10.jpg  →  1 plate(s) found
-  [1] KLO7BFSOOO  (0.70)
+  [1] KLOZBFSOOO  (0.70)
+  Press any key for next image, 'q' to quit ...
+
+img11.jpg  →  1 plate(s) found
+  [1] 6J23FAU0819  (0.74)
   Press any key for next image, 'q' to quit ...
 
 img2.jpg  →  1 plate(s) found
@@ -175,15 +225,15 @@ img2.jpg  →  1 plate(s) found
   Press any key for next image, 'q' to quit ...
 
 img3.jpg  →  1 plate(s) found
-  [1] UK07BA72521  (0.77)
+  [1] UK078472527  (0.77)
   Press any key for next image, 'q' to quit ...
 
 img4.jpg  →  1 plate(s) found
-  [1] UP7BEJ7683  (0.77)
+  [1] UP78EJ7683  (0.77)
   Press any key for next image, 'q' to quit ...
 
 img5.jpg  →  1 plate(s) found
-  [1] DDL10CG4693  (0.72)
+  [1] DL10C64693  (0.72)
   Press any key for next image, 'q' to quit ...
 
 img6.jpg  →  1 plate(s) found
@@ -191,15 +241,15 @@ img6.jpg  →  1 plate(s) found
   Press any key for next image, 'q' to quit ...
 
 img7.jpg  →  1 plate(s) found
-  [1] UP3ZEC5A4J  (0.78)
+  [1] UP3ZEC5141  (0.78)
   Press any key for next image, 'q' to quit ...
 
 img8.jpg  →  1 plate(s) found
-  [1] TSO8ER4643  (0.69)
+  [1] TSOBER1642  (0.69)
   Press any key for next image, 'q' to quit ...
 
 img9.jpg  →  1 plate(s) found
-  [1] AS01BZ2O02  (0.81)
+  [1] AS01BZ20027  (0.81)
   Press any key for next image, 'q' to quit ...
 
 Done.
